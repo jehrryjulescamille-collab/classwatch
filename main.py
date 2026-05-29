@@ -1,24 +1,27 @@
 import streamlit as st
-import cv2
 import numpy as np
 from PIL import Image
 import sqlite3
 import pandas as pd
 from datetime import datetime
 import os
+import requests
 
-# CLIP pour l'analyse IA
+# ⚠️ OpenCV léger
+import cv2
+
+# IA
 from transformers import pipeline
 
-# ===================== CONFIGURATION =====================
+# ===================== CONFIG =====================
 st.set_page_config(page_title="Gestion Incidents Classe", layout="wide")
-st.title("📸 Gestion des Incidents en Classe")
+st.title("📸 Gestion intelligente des incidents")
 
-# Dossier pour sauvegarder les photos
+# ===================== DOSSIER =====================
 if not os.path.exists("incidents_photos"):
     os.makedirs("incidents_photos")
 
-# ===================== BASE DE DONNÉES =====================
+# ===================== DATABASE =====================
 def init_db():
     conn = sqlite3.connect('incidents.db')
     c = conn.cursor()
@@ -29,6 +32,8 @@ def init_db():
                     description TEXT,
                     photo_path TEXT,
                     analyse_ia TEXT,
+                    objets TEXT,
+                    meteo TEXT,
                     gravite TEXT
                 )''')
     conn.commit()
@@ -36,145 +41,152 @@ def init_db():
 
 init_db()
 
-def ajouter_incident(date, classe, desc, photo_path, analyse, gravite):
+def ajouter_incident(date, classe, desc, photo_path, analyse, objets, meteo, gravite):
     conn = sqlite3.connect('incidents.db')
     c = conn.cursor()
-    c.execute("INSERT INTO incidents (date, classe, description, photo_path, analyse_ia, gravite) VALUES (?,?,?,?,?,?)",
-              (date, classe, desc, photo_path, analyse, gravite))
+    c.execute("INSERT INTO incidents (date, classe, description, photo_path, analyse_ia, objets, meteo, gravite) VALUES (?,?,?,?,?,?,?,?)",
+              (date, classe, desc, photo_path, analyse, objets, meteo, gravite))
     conn.commit()
     conn.close()
 
-# ===================== ANALYSE IA (CLIP) =====================
+# ===================== IA =====================
 @st.cache_resource
-def load_clip():
+def load_model():
     return pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
 
-detector = load_clip()
+detector = load_model()
 
 def analyser_image(image):
-    # Labels en français pour meilleure précision
     labels = [
-        "classe bien ordonnée et propre",
-        "classe désordonnée",
-        "classe sale avec poussière partout",
+        "classe propre",
+        "classe sale",
+        "désordre",
         "chaises renversées",
         "tables en désordre",
-        "déchets par terre",
-        "classe propre et organisée",
-        "problème de propreté",
-        "incivilité ou dégradation"
+        "déchets au sol",
+        "classe organisée",
+        "dégradation",
+        "incivilité"
     ]
-    
-    # Convertir en PIL
+
     if isinstance(image, np.ndarray):
         image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    
+
     result = detector(image, candidate_labels=labels)
-    
-    # Meilleur résultat + score
     top = result[0]
-    return f"{top['label'].capitalize()} ({top['score']:.1%})", top['score']
 
-# ===================== INTERFACE =====================
-tab1, tab2, tab3 = st.tabs(["📸 Nouvel Incident", "📋 Historique", "📊 Tableau de Bord"])
+    return top['label'], top['score']
 
+# 🔍 simulation objets (léger cloud-friendly)
+def detecter_objets_simple(analyse_label):
+    mapping = {
+        "chaises renversées": ["chaise"],
+        "tables en désordre": ["table"],
+        "déchets au sol": ["déchets"],
+        "désordre": ["chaise", "table"],
+    }
+    return mapping.get(analyse_label, ["inconnu"])
+
+# ===================== METEO =====================
+API_KEY = "TA_CLE_API"  # ⚠️ mets ta clé ici
+
+def get_weather(city="Paris"):
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}&units=metric&lang=fr"
+        data = requests.get(url).json()
+        return f"{data['weather'][0]['description']} - {data['main']['temp']}°C"
+    except:
+        return "Indisponible"
+
+# ===================== UI =====================
+tab1, tab2, tab3 = st.tabs(["📸 Nouvel Incident", "📋 Historique", "📊 Dashboard"])
+
+# ===================== TAB 1 =====================
 with tab1:
-    st.subheader("Prendre une photo de l'incident")
-    
-    col1, col2 = st.columns([3, 2])
-    
-    with col1:
-        classe = st.selectbox("Classe / Salle", 
-                            ["6A", "6B", "5A", "5B", "4A", "4B", "3A", "3B", "Autre"])
-        description = st.text_area("Description de l'incident", 
-                                 placeholder="Ex: Chaises renversées après la récré...")
-        
-        # Prise de photo
-        photo_file = st.camera_input("📷 Prendre une photo")
-        
-        if photo_file is not None:
-            # Sauvegarder l'image
-            img_array = np.frombuffer(photo_file.getvalue(), np.uint8)
-            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            photo_path = f"incidents_photos/incident_{timestamp}.jpg"
-            cv2.imwrite(photo_path, img)
-            
-            st.image(img, channels="BGR", caption="Photo capturée")
-            
-            # Analyse IA
-            if st.button("🔍 Analyser avec l'IA", type="primary"):
-                with st.spinner("Analyse en cours..."):
-                    analyse_ia, score = analyser_image(img)
-                    st.success(f"**Analyse IA :** {analyse_ia}")
-                    
-                    # Détermination gravité
-                    if score > 0.7 and ("désordonnée" in analyse_ia or "sale" in analyse_ia or "renversées" in analyse_ia):
-                        gravite = "⚠️ Élevée"
-                    elif score > 0.5:
-                        gravite = "⚡ Moyenne"
-                    else:
-                        gravite = "🟢 Faible"
-                    
-                    st.info(f"**Gravité estimée :** {gravite}")
-                    
-                    # Sauvegarde
-                    if st.button("💾 Enregistrer l'incident"):
-                        ajouter_incident(
-                            datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            classe,
-                            description,
-                            photo_path,
-                            analyse_ia,
-                            gravite
-                        )
-                        st.success("Incident enregistré avec succès !")
+    st.subheader("Détection intelligente")
 
+    classe = st.selectbox("Classe", ["6A","6B","5A","5B","4A","4B","3A","3B"])
+    description = st.text_area("Description")
+
+    ville = st.text_input("Ville (météo)", "Paris")
+
+    photo_file = st.camera_input("📷 Photo")
+
+    if photo_file:
+        img_array = np.frombuffer(photo_file.getvalue(), np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        st.image(img, channels="BGR")
+
+        if st.button("🔍 Analyse complète"):
+            with st.spinner("Analyse IA..."):
+
+                label, score = analyser_image(img)
+                objets = detecter_objets_simple(label)
+                meteo = get_weather(ville)
+
+                st.success(f"Analyse : {label} ({score:.1%})")
+                st.write("Objets détectés :", ", ".join(objets))
+                st.write("Météo :", meteo)
+
+                # gravité intelligente
+                if score > 0.7 and label in ["désordre","classe sale","dégradation"]:
+                    gravite = "⚠️ Élevée"
+                elif score > 0.5:
+                    gravite = "⚡ Moyenne"
+                else:
+                    gravite = "🟢 Faible"
+
+                st.info(f"Gravité : {gravite}")
+
+                if st.button("💾 Enregistrer"):
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    path = f"incidents_photos/{timestamp}.jpg"
+                    cv2.imwrite(path, img)
+
+                    ajouter_incident(
+                        datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        classe,
+                        description,
+                        path,
+                        label,
+                        ", ".join(objets),
+                        meteo,
+                        gravite
+                    )
+
+                    st.success("Enregistré")
+
+# ===================== TAB 2 =====================
 with tab2:
-    st.subheader("Historique des Incidents")
-    
     conn = sqlite3.connect('incidents.db')
     df = pd.read_sql_query("SELECT * FROM incidents ORDER BY date DESC", conn)
     conn.close()
-    
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        
-        # Filtre par classe
-        classe_filter = st.selectbox("Filtrer par classe", ["Toutes"] + sorted(df['classe'].unique()))
-        if classe_filter != "Toutes":
-            df = df[df['classe'] == classe_filter]
-            st.dataframe(df)
-    else:
-        st.info("Aucun incident enregistré pour le moment.")
 
+    if not df.empty:
+        st.dataframe(df)
+    else:
+        st.info("Aucun incident")
+
+# ===================== TAB 3 =====================
 with tab3:
-    st.subheader("Tableau de Bord")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Incidents", len(df) if 'df' in locals() else 0)
-    with col2:
-        if 'df' in locals() and not df.empty:
-            st.metric("Incidents Élevés", len(df[df['gravite'].str.contains('Élevée')]))
-    with col3:
-        st.metric("Classes Concernées", df['classe'].nunique() if 'df' in locals() and not df.empty else 0)
-    
     if 'df' in locals() and not df.empty:
+
+        st.metric("Total", len(df))
+        st.metric("Graves", len(df[df['gravite'].str.contains("Élevée")]))
+        st.metric("Classes", df['classe'].nunique())
+
         st.bar_chart(df['classe'].value_counts())
 
-# Sidebar
+# ===================== SIDEBAR =====================
 with st.sidebar:
-    st.header("À propos")
-    st.write("Application de gestion des incidents en classe avec détection IA.")
-    st.caption("Utilise OpenAI CLIP pour l'analyse zéro-shot.")
-    
-    if st.button("🗑️ Supprimer tous les incidents (attention)"):
-        if st.checkbox("Confirmer la suppression"):
-            conn = sqlite3.connect('incidents.db')
-            conn.execute("DELETE FROM incidents")
-            conn.commit()
-            conn.close()
-            st.success("Base de données vidée.")
-            st.rerun()
+    st.header("Infos")
+    st.write("App IA + météo")
+
+    if st.button("🗑️ Reset"):
+        conn = sqlite3.connect('incidents.db')
+        conn.execute("DELETE FROM incidents")
+        conn.commit()
+        conn.close()
+        st.success("Reset OK")
+        st.rerun()
